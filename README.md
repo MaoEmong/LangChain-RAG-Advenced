@@ -1,195 +1,103 @@
-# LangChain 기반 RAG 시스템
+# LangChain 기반 RAG 시스템 (고급 버전)
 
-LangChain과 ChromaDB를 활용한 기본적인 Retrieval-Augmented Generation (RAG) 시스템입니다.
+LangChain과 Chroma를 활용해 **RAG QA**와 **명령 JSON 생성**을 모두 제공하는 FastAPI 서버 버전입니다. 검색 신뢰도 컷, confidence 계산, intent 분류, 명령 화이트리스트 검증 등을 포함합니다.
 
-## 📋 프로젝트 개요
+## 주요 기능
+- 다중 포맷 문서 로딩(`.txt/.md/.pdf/.docx/.html`) 후 청킹 및 Chroma에 적재 (`ingest_langchain.py`)
+- MMR 기반 retriever + guardrail: top score 컷, 충분한 good hit 검사
+- confidence 점수 계산 및 레벨(high/medium/low) 반환
+- intent 분류(rule → LLM)로 explain/command 자동 라우팅 (`/ask`)
+- 명령 JSON 생성 체인 + 화이트리스트 검증 (`/command`)
+- 출처·score·미리보기 포함 RAG 답변 (`/chat`)
 
-이 프로젝트는 RAG 시스템의 핵심 구조를 이해하고 구현하기 위한 학습용 프로젝트입니다. 문서를 벡터로 변환하여 저장하고, 사용자의 질문과 관련된 문서를 검색한 뒤 OpenAI 모델을 통해 답변을 생성합니다.
+## 기술 스택
+- Python 3, FastAPI, Uvicorn
+- LangChain, LangChain OpenAI/Chroma/Text Splitters/Community
+- Chroma (persisted vector DB)
+- Pydantic
 
-### RAG 프로세스
-
-1. **문서 수집 및 전처리**: `docs` 폴더의 문서들을 로드
-2. **문서 임베딩 및 벡터 DB 저장**: 텍스트를 청킹하고 벡터로 변환하여 ChromaDB에 저장
-3. **질문 임베딩**: 사용자 질문을 벡터로 변환
-4. **유사 문서 검색**: 벡터 유사도 기반으로 관련 문서 검색
-5. **검색 결과 기반 답변 생성**: 검색된 문서를 컨텍스트로 사용하여 답변 생성
-
-## 🛠️ 기술 스택
-
-### Backend
-- Python 3
-- LangChain
-- Chroma Vector Database
-
-### AI / ML
-- OpenAI API (임베딩 및 채팅 모델)
-- LangChain 텍스트 스플리터 (문서 청킹)
-- Embedding 기반 유사도 검색
-
-## 📁 프로젝트 구조
-
+## 폴더 구조
 ```
-MyPython/
-├── docs/                    # 문서 저장 폴더
-│   ├── intro.txt
-│   ├── project_overview.txt
-│   ├── rag_concept.txt
-│   ├── tech_stack.md
-│   └── ...
-├── chroma_db/               # ChromaDB 벡터 데이터베이스 저장 경로
-├── config.py                # 설정 파일 (API 키 등)
-├── ingest_langchain.py      # 문서 수집 및 벡터DB 구축 스크립트
-├── query_test.py            # 벡터 검색 테스트 스크립트
-└── README.md
+.
+├── chains/               # RAG/command 체인 정의
+├── commands/             # 허용 명령 화이트리스트
+├── docs/                 # 원본 문서
+├── prompts/              # LLM 프롬프트 템플릿
+├── schemas/              # Pydantic 스키마
+├── services/             # vector DB, parser, validator, confidence, intent
+├── ingest_langchain.py   # 문서 적재 스크립트
+├── rag_server.py         # FastAPI 진입점 (/chat, /command, /ask)
+├── query_test.py         # 검색만 단독 테스트
+├── config.py             # 설정 (API 키는 환경변수 사용 권장)
+└── chroma_db/            # 벡터 DB 저장 위치
 ```
 
-## 🚀 시작하기
-
-### 1. 환경 설정
-
-필요한 패키지를 설치합니다:
-
+## 설치 & 환경 설정
+1) 패키지 설치  
 ```bash
-pip install langchain langchain-openai langchain-chroma langchain-community
+pip install -r requirements.txt
 ```
 
-### 2. 설정 파일 구성
-
-⚠️ **중요**: `config.py`에는 개인 API 키가 포함되어 있습니다. 보안을 위해 다음 중 하나를 권장합니다:
-
-#### 방법 1: 환경 변수 사용 (권장)
-
-`config.py`를 다음과 같이 수정:
-
-```python
-import os
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-api-key-here")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-CHROMA_DIR = "./chroma_db"
-COLLECTION_NAME = "my_rag_docs"
-TOP_K = 4
+2) 환경 변수(.env 권장)  
 ```
-
-환경 변수 설정:
-```bash
-# Windows
-set OPENAI_API_KEY=your-api-key-here
-
-# Linux/Mac
-export OPENAI_API_KEY=your-api-key-here
-```
-
-#### 방법 2: .env 파일 사용
-
-`.env` 파일 생성:
-```
-OPENAI_API_KEY=your-api-key-here
+OPENAI_API_KEY=your-api-key
 EMBED_MODEL=text-embedding-3-small
 CHAT_MODEL=gpt-4o-mini
+CHROMA_DIR=./chroma_db
+COLLECTION_NAME=my_rag_docs
+TOP_K=4
+# 선택: guard/confidence 파라미터는 config.py에서 조정
 ```
+`config.py`에 키를 하드코딩하지 말고 환경변수/비밀 관리 서비스를 사용하세요. 버전 관리 시 `config.py`를 커밋에서 제외하세요.
 
-`python-dotenv` 설치:
-```bash
-pip install python-dotenv
-```
-
-`config.py`에서 로드:
-```python
-from dotenv import load_dotenv
-load_dotenv()
-```
-
-### 3. 문서 준비
-
-`docs` 폴더에 처리할 문서 파일들을 넣습니다. 지원되는 파일 형식:
-- `.txt` (텍스트 파일)
-- `.md` (마크다운)
-- `.pdf` (PDF 문서)
-- `.docx` (Word 문서)
-- `.html` / `.htm` (HTML 파일)
-
-### 4. 벡터 데이터베이스 구축
-
-문서를 로드하고 벡터DB에 저장합니다:
-
+## 데이터 적재(ingest)
+문서를 `docs/`에 넣은 뒤 실행:
 ```bash
 python ingest_langchain.py
 ```
+- 기본 청크: 600자, 오버랩 100자 (`ingest_langchain.py`에서 조정)
+- 새 문서를 추가하거나 내용을 바꾼 경우에만 재실행하면 됩니다.
 
-이 스크립트는:
-- `docs` 폴더의 모든 문서를 읽습니다
-- 문서를 작은 청크(chunk)로 분할합니다 (기본: 1500자, 오버랩: 150자)
-- 각 청크를 임베딩 벡터로 변환합니다
-- ChromaDB에 저장합니다
-
-**참고**: 문서가 변경되었을 때만 다시 실행하면 됩니다.
-
-### 5. 검색 테스트
-
-벡터 검색 기능을 테스트합니다:
-
+## 서버 실행
 ```bash
-python query_test.py
+uvicorn rag_server:app --reload --port 8000
 ```
 
-질문을 입력하면 관련 문서들을 검색하여 보여줍니다.
+## API 엔드포인트
+- `POST /chat` : RAG QA
+  - 입력: `{"question": "..."}`  
+  - 응답: `answer`, `sources`(source/score/preview), `guard`(reason, top_score, good_hits), `confidence`
+- `POST /command` : 명령 JSON 제안
+  - guardrail: 검색 결과/신뢰도 부족 시 차단, 화이트리스트 검증 실패 시 거부
+  - 응답: `speech`, `actions[]`, `confidence`, `guard`(optional)
+- `POST /ask` : intent 자동 분기
+  - rule 기반 → LLM 보완으로 explain/command 결정 후 해당 로직 재사용
 
-## 📝 주요 파일 설명
+### 간단 호출 예시
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "RAG 파이프라인 설명해줘"}'
 
-### `ingest_langchain.py`
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "테크 스택 문서 열어줘"}'
+```
 
-RAG 시스템의 **데이터 준비 단계**를 담당합니다.
+## 동작 흐름
+1) ingest: 문서 로드 → 청킹 → 임베딩 → Chroma 적재  
+2) 요청 시: MMR 검색 → guardrail 검사(top score, good hits) → confidence 계산  
+3) `/chat`: 컨텍스트 포맷팅 → LLM 답변 + 출처 반환  
+4) `/command`: 컨텍스트 → LLM JSON 생성 → 파싱/검증 → 허용 명령만 반환  
+5) `/ask`: intent 분류 후 `/chat` 또는 `/command` 실행
 
-- `docs` 폴더의 문서를 읽어 LangChain Document 형식으로 변환
-- 긴 문서를 작은 청크로 분할 (`RecursiveCharacterTextSplitter` 사용)
-- 각 청크를 OpenAI 임베딩 모델로 벡터화
-- ChromaDB에 저장
+## 주요 설정 포인트
+- `ingest_langchain.py`: `CHUNK_SIZE`, `CHUNK_OVERLAP`, `COLLECTION_NAME`
+- `config.py`: `TOP_K`, `TOP_SCORE_MAX`, `MIN_GOOD_HITS`, `GOOD_HIT_SCORE_MAX`, `CONF_SCORE_MIN/MAX`
+- `commands/registry.py`: 허용 명령 및 필수 args 정의
 
-### `query_test.py`
-
-RAG 시스템의 **검색(Retrieval) 단계**만 테스트하는 스크립트입니다.
-
-- 저장된 ChromaDB를 로드
-- 사용자 질문을 입력받음
-- 벡터 유사도 검색으로 관련 문서 찾기
-- 검색 결과 출력
-
-### `config.py`
-
-프로젝트 전체에서 사용하는 설정값을 관리합니다.
-
-⚠️ **보안 주의사항**:
-- 이 파일에는 OpenAI API 키가 포함되어 있습니다
-- Git에 커밋하지 않도록 `.gitignore`에 추가하세요
-- 실제 배포 시에는 환경 변수나 비밀 관리 서비스를 사용하세요
-
-## ⚙️ 설정 옵션
-
-`ingest_langchain.py`에서 조정 가능한 설정:
-
-- `CHUNK_SIZE`: 청크 크기 (기본: 1500자)
-- `CHUNK_OVERLAP`: 청크 간 겹치는 영역 (기본: 150자)
-- `COLLECTION_NAME`: ChromaDB 컬렉션 이름 (기본: "my_rag_docs")
-
-`config.py`에서 조정 가능한 설정:
-
-- `EMBED_MODEL`: 임베딩 모델 (기본: "text-embedding-3-small")
-- `CHAT_MODEL`: 채팅 모델 (기본: "gpt-4o-mini")
-- `TOP_K`: 검색할 문서 개수 (기본: 4)
-
-## 🔒 보안 고려사항
-
-1. **API 키 관리**: `config.py`에 직접 API 키를 작성하지 말고, 환경 변수나 `.env` 파일을 사용하세요
-2. **Git 제외**: `config.py`를 `.gitignore`에 추가하여 버전 관리에서 제외하세요
-3. **템플릿 파일**: 공유할 경우 `config.example.py` 같은 템플릿 파일을 만들어서 API 키 부분만 비워두는 것을 권장합니다
-
-## 📚 참고 자료
-
-프로젝트 내 `docs` 폴더에는 RAG 개념, 기술 스택, 프로젝트 개요 등에 대한 문서가 포함되어 있습니다.
-
-## 📄 라이선스
-
-이 프로젝트는 학습용 프로젝트입니다.
+## 보안/운영 팁
+- API 키는 환경변수나 비밀 관리 서비스로 주입
+- 벡터 DB(`chroma_db/`)는 필요 시 백업/재생성 가능
+- 문제 발생 시 `docs/troubleshooting.txt` 참고
 
