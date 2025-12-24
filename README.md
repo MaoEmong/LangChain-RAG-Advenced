@@ -48,7 +48,6 @@ COLLECTION_NAME=my_rag_docs
 TOP_K=4
 # 선택: guard/confidence 파라미터는 config.py에서 조정
 ```
-`config.py`에 키를 하드코딩하지 말고 환경변수/비밀 관리 서비스를 사용하세요. 버전 관리 시 `config.py`를 커밋에서 제외하세요.
 
 ## 데이터 적재(ingest)
 문서를 `docs/`에 넣은 뒤 실행:
