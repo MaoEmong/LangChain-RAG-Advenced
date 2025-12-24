@@ -15,9 +15,15 @@ COMMAND_PROMPT_TEMPLATE = """
 규칙(매우 중요):
 1) [CONTEXT]에 없는 함수(name)는 절대 사용하지 마라.
 2) args는 반드시 JSON 객체여야 한다. 인자가 없으면 {{}} 로 둬라.
-3) 불확실하면 actions를 빈 배열([])로 두고 speech에 "확신이 부족"이라고 말해라.
+3) [CONTEXT]에서 관련 함수를 찾았으면 적극적으로 명령을 생성해라. 불확실한 경우에만 actions를 빈 배열([])로 두고 speech에 "확신이 부족"이라고 말해라.
 4) 출력은 오직 JSON 하나만 출력해라. (설명 문장/코드블록/추가 텍스트 금지)
 5) 사용자의 명령이 "설명/질문"에 가까우면 actions는 빈 배열로 두고 speech로 안내해라.
+
+명령 매핑 가이드 (참고):
+- "다크모드", "다크 모드", "어두운 모드" → SetAppTheme, theme: "dark"
+- "라이트모드", "라이트 모드", "밝은 모드" → SetAppTheme, theme: "light"
+- "시스템 설정", "시스템 따라가기" → SetAppTheme, theme: "system"
+- "테마 바꿔", "테마 변경" → SetAppTheme (적절한 theme 값 사용)
 
 출력 형식(JSON):
 {{
