@@ -1,145 +1,71 @@
 """
 query_test.py
-============================================================
-벡터 검색 테스트 스크립트
-
-이 파일의 역할:
-------------------------------------------------------------
-✔ 이미 저장된 Chroma 벡터DB를 불러온다
-✔ 질문을 하나 입력받는다
-✔ 벡터DB에서 질문과 가장 유사한 문서(chunk)를 검색한다
-✔ 검색 결과를 콘솔에 출력한다
-
-즉,
-👉 "RAG의 검색(Retrieval) 단계만 단독으로 테스트"하는 파일
-
-실행:
-  python query_test.py
-
-실행 흐름:
-  python query_test.py
-   ↓
-  벡터DB 로드
-   ↓
-  질문 입력
-   ↓
-  질문을 벡터로 변환
-   ↓
-  벡터DB에서 가장 가까운 문서 검색
-   ↓
-  검색 결과 출력
-
-주의:
-- ingest_langchain.py를 먼저 실행하여 벡터DB를 생성해야 함
-- 서버를 실행하지 않고 검색 기능만 테스트하는 용도
+- ParentDocumentRetriever 동작 테스트용 (LangChain v1.x + langchain-classic 기준)
+- child(Chroma)로 검색 → parent(SQLite)로 복원해서 출력
 """
 
-# ----------------------------
-# LangChain 관련 컴포넌트
-# ----------------------------
-
-# OpenAIEmbeddings:
-# - 질문 텍스트를 벡터로 변환하기 위해 필요
 from langchain_openai import OpenAIEmbeddings
-
-# Chroma:
-# - 로컬에 저장된 벡터DB를 불러오는 클래스
 from langchain_chroma import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.retrievers import ParentDocumentRetriever
 
-
-# ----------------------------
-# 프로젝트 설정값
-# ----------------------------
-
-# config.py에 모아둔 설정
+from docstore_sqlite import SQLiteDocStore
 from config import (
-    EMBED_MODEL,       # 임베딩 모델 이름
-    OPENAI_API_KEY,    # 테스트용 OpenAI API 키
+    OPENAI_API_KEY,
+    EMBED_MODEL,
+    CHROMA_DIR,
+    COLLECTION_NAME,
+    DOCSTORE_PATH,
 )
 
+# ingest_langchain.py에 맞춤 (현재 파일 내부 상수로 사용)
+CHUNK_SIZE = 600
+CHUNK_OVERLAP = 100
 
-# ----------------------------
-# 벡터DB 설정
-# ----------------------------
+def build_parent_retriever():
+    embeddings = OpenAIEmbeddings(model=EMBED_MODEL, api_key=OPENAI_API_KEY)
 
-# 벡터DB가 실제로 저장된 디렉토리
-CHROMA_DIR = "./chroma_db"
-
-# ingest 단계에서 사용한 컬렉션 이름과 반드시 같아야 함
-COLLECTION_NAME = "my_rag_docs"
-
-
-# ============================================================
-# 메인 실행 함수
-# ============================================================
-def main():
-    """
-    query_test.py 실행 시 이 함수부터 시작됩니다.
-
-    실행 흐름:
-    1. 임베딩 객체 생성 (질문을 벡터로 변환하기 위해)
-    2. 벡터DB 로드 (이미 저장된 벡터DB 불러오기)
-    3. 사용자 질문 입력 (콘솔에서 입력받음)
-    4. 유사 문서 검색 (벡터 유사도 기반)
-    5. 검색 결과 출력 (상위 문서들 표시)
-
-    Returns:
-        None
-    """
-    # ============================================================
-    # 1단계: 임베딩 객체 생성
-    # ============================================================
-    # 질문을 벡터로 바꾸는 데 사용
-    # ⚠️ 중요: ingest 단계와 같은 모델을 써야 함
-    # (다른 모델을 사용하면 벡터 공간이 달라져 검색이 안 됨)
-    embeddings = OpenAIEmbeddings(
-        model=EMBED_MODEL,
-        api_key=OPENAI_API_KEY
-    )
-
-    # ============================================================
-    # 2단계: 벡터DB 로드
-    # ============================================================
-    # persist_directory에 저장된 DB를 그대로 불러옵니다
-    # - collection_name: ingest 단계에서 사용한 이름과 동일해야 함
-    # - embedding_function: 위에서 생성한 임베딩 객체 사용
     db = Chroma(
         collection_name=COLLECTION_NAME,
         embedding_function=embeddings,
         persist_directory=CHROMA_DIR,
     )
 
-    # ============================================================
-    # 3단계: 사용자 질문 입력
-    # ============================================================
-    # 콘솔에서 질문을 직접 입력받음
-    q = input("질문> ").strip()
+    docstore = SQLiteDocStore(DOCSTORE_PATH)
 
-    # ============================================================
-    # 4단계: 유사 문서 검색
-    # ============================================================
-    # similarity_search 동작 과정:
-    # 1. 질문 텍스트를 벡터로 변환 (임베딩 모델 사용)
-    # 2. 벡터DB에서 코사인 유사도가 가장 높은 문서 검색
-    # 3. 상위 k개 문서 반환 (여기서는 k=4)
-    docs = db.similarity_search(q, k=4)
+    parent_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=200,
+    )
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+    )
 
-    # ============================================================
-    # 5단계: 결과 출력
-    # ============================================================
-    print("\n--- TOP MATCHES ---")
+    return ParentDocumentRetriever(
+        vectorstore=db,
+        docstore=docstore,
+        child_splitter=child_splitter,
+        parent_splitter=parent_splitter,
+        parent_id_key="doc_id",
+    )
 
-    # 검색된 문서들을 순위별로 출력
-    for i, d in enumerate(docs, start=1):
-        # metadata에 저장된 문서 출처 (파일 경로)
-        print(f"\n[{i}] source={d.metadata.get('source')}")
+def main():
+    retriever = build_parent_retriever()
 
-        # 문서 내용 일부만 출력 (너무 길면 보기 힘드니까 400자로 제한)
-        print(d.page_content[:400])
+    while True:
+        q = input("질문> ").strip()
+        if not q:
+            continue
 
+        # ✅ v1.x 계열에서는 invoke()가 정석
+        docs = retriever.invoke(q)
 
-# ============================================================
-# 파이썬 파일 직접 실행 시 시작 지점
-# ============================================================
+        print("\n--- TOP MATCHES (PARENTS expected) ---")
+        for i, d in enumerate(docs[:4], start=1):
+            src = (d.metadata or {}).get("source", "unknown")
+            print(f"\n[{i}] source={src}  len={len(d.page_content)}")
+            print(d.page_content[:800])
+
 if __name__ == "__main__":
     main()

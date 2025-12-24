@@ -29,6 +29,7 @@ ingest_langchain.py
 # ----------------------------
 import os      # 경로 처리, 폴더 생성
 import glob    # 폴더 안 파일을 재귀적으로 검색
+import uuid
 
 
 # ----------------------------
@@ -69,12 +70,20 @@ from langchain_community.document_loaders import (
     BSHTMLLoader,               # .html / .htm
 )
 
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import TextLoader
+
+from langchain_classic.retrievers import ParentDocumentRetriever
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from docstore_sqlite import SQLiteDocStore
+from config import DOCSTORE_PATH
 
 # ----------------------------
 # 프로젝트 공통 설정
 # ----------------------------
 # config.py에 정의된 값들
-from config import EMBED_MODEL, OPENAI_API_KEY
+from config import EMBED_MODEL, OPENAI_API_KEY, CHUNK_SIZE, CHUNK_OVERLAP
 
 
 # ============================================================
@@ -89,16 +98,6 @@ CHROMA_DIR = "./chroma_db"
 
 # Chroma 내부에서 사용하는 컬렉션 이름
 COLLECTION_NAME = "my_rag_docs"
-
-# chunk 크기
-# - 너무 크면 검색이 둔해짐
-# - 너무 작으면 문맥이 끊김
-CHUNK_SIZE = 600
-
-# chunk 겹침 영역
-# - 앞/뒤 문맥이 자연스럽게 이어지도록 일부 겹침
-CHUNK_OVERLAP = 100
-
 
 # ============================================================
 # 1️⃣ 문서 로딩 단계 (로더 확장 버전)
@@ -221,6 +220,26 @@ def chunk_docs(docs: list[Document]) -> list[Document]:
     # 출력  : [chunked Document, chunked Document, ...] (작은 청크들)
     return splitter.split_documents(docs)
 
+def build_parent_retriever(db: Chroma) -> ParentDocumentRetriever:
+    """Parent/Child 구조를 구성해주는 retriever 팩토리."""
+    docstore = SQLiteDocStore(DOCSTORE_PATH)
+
+    parent_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=200,
+    )
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+    )
+
+    return ParentDocumentRetriever(
+        vectorstore=db,
+        docstore=docstore,
+        child_splitter=child_splitter,
+        parent_splitter=parent_splitter,
+        parent_id_key="doc_id",
+    )
 
 # ============================================================
 # 3️⃣ 벡터DB 저장 단계
@@ -266,6 +285,15 @@ def build_or_update_chroma(chunks: list[Document]) -> None:
     # 각 청크의 텍스트가 임베딩되어 벡터로 변환되고 저장됨
     db.add_documents(chunks)
 
+def build_or_load_chroma() -> Chroma:
+    embeddings = OpenAIEmbeddings(model=EMBED_MODEL, api_key=OPENAI_API_KEY)
+    db = Chroma(
+        collection_name=COLLECTION_NAME,
+        embedding_function=embeddings,
+        persist_directory=CHROMA_DIR,
+    )
+    return db
+
 
 # ============================================================
 # 메인 실행 함수
@@ -295,16 +323,17 @@ def main():
         print(f"[WARN] no docs found in {DOCS_DIR}")
         return
 
-    # 2단계: 청킹
-    # 긴 문서를 작은 청크로 분할 (검색 정확도 향상)
-    chunks = chunk_docs(docs)
+    # ✅ parent_id(doc_id) 부여(필수)
+    for d in docs:
+        d.metadata["doc_id"] = str(uuid.uuid4())
 
-    # 3단계: 벡터DB 저장
-    # 각 청크를 임베딩하여 벡터DB에 저장
-    build_or_update_chroma(chunks)
+    db = build_or_load_chroma()
+    retriever = build_parent_retriever(db)
 
-    # 완료 메시지 출력
-    print(f"[OK] loaded docs: {len(docs)}, stored chunks: {len(chunks)}")
+    # ✅ 핵심: parent는 SQLite에, child는 Chroma에 들어감
+    retriever.add_documents(docs)
+
+    print(f"[OK] loaded docs: {len(docs)} (parents stored in sqlite, children in chroma)")
 
 
 # ============================================================

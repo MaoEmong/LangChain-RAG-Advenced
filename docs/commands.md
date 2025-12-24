@@ -1,259 +1,237 @@
-Client Commands (Executable Actions Catalog)
+# Client Commands (Executable Actions Catalog)
 
-이 문서는 클라이언트에서 실제로 실행 가능한 함수(명령) 목록이다.
-서버(LLM)는 반드시 이 문서에 정의된 함수만 사용해서 command JSON을 생성해야 한다.
+이 문서는 클라이언트에서 실제로 실행 가능한 **명령(JSON) 생성 전용 함수 카탈로그**입니다.  
+서버(LLM)는 반드시 이 문서에 정의된 함수만 사용해서 command JSON을 생성해야 합니다.
 
-공통 규칙 (중요)
+---
 
-이 문서에 없는 함수 이름은 절대 사용하지 않는다.
-args는 반드시 JSON object 형태여야 한다.
-인자가 없을 경우 args는 빈 객체 {} 로 둔다.
-사용자의 입력이 설명/질문에 가까우면 actions는 빈 배열 [] 로 둔다.
-명령이 애매하거나 확신이 부족하면 actions는 [] 로 두고 speech로 안내한다.
+## 사용 범위 안내 (중요)
 
-1. OpenUrl
-설명
-브라우저에서 특정 URL을 연다.
+- 이 문서는 **명령(JSON) 생성**이 목적입니다.
+- 프로그램 개요, 구조, 기술 설명, 동작 원리 같은 질문에는  
+  intro.txt, project_overview.txt, tech_stack.md, rag_concept.txt 를 우선 참고해야 합니다.
+- 사용자가 **“열어줘 / 복사해줘 / 바꿔줘 / 실행해줘”** 처럼
+  실제 행동을 요구할 때만 이 문서를 핵심 근거로 사용합니다.
 
-함수 이름
+---
+
+## 공통 규칙 (절대 준수)
+
+- 이 문서에 없는 함수 이름은 절대 생성하지 않습니다.
+- args는 반드시 JSON object 형태여야 합니다. (인자가 없으면 {})
+- 설명/질문에 가까운 입력이면 actions는 빈 배열 [] 로 둡니다.
+- 명령이 애매하거나 확신이 부족하면 actions는 [] 로 두고 speech로 안내합니다.
+- 실행을 직접 수행하지 않습니다. 항상 **“제안” 형태의 JSON**만 생성합니다.
+
+---
+
+## 출력 JSON 기본 구조
+
+{
+  "type": "command",
+  "speech": "사용자에게 보여줄 안내 문구",
+  "actions": [
+    {
+      "name": "함수이름",
+      "args": { "param": "value" }
+    }
+  ]
+}
+
+---
+
+## 1. OpenUrl
+
+설명  
+브라우저에서 특정 URL을 엽니다.
+
+name  
 OpenUrl
 
-Args
-url (string, 필수): 열 URL
+args  
+- url (string, required): 열 URL
 
-예시 JSON 구조
-name: OpenUrl
-args:
+예시  
+{
+  "name": "OpenUrl",
+  "args": { "url": "https://example.com" }
+}
 
-url: https://example.com
+---
 
-사용자 예시
+## 2. ShowNotification
 
-구글 열어줘
-이 링크 열어줘: https://naver.com
+설명  
+클라이언트 알림(토스트/스낵바/푸시 등)을 표시합니다.
 
-2. ShowNotification
-
-설명
-클라이언트 알림(토스트, 스낵바, 푸시 등)을 표시한다.
-
-함수 이름
+name  
 ShowNotification
 
-Args
+args  
+- message (string, required)  
+- title (string, optional)
 
-title (string, 선택)
-message (string, 필수)
+예시  
+{
+  "name": "ShowNotification",
+  "args": { "title": "알림", "message": "작업이 완료되었습니다." }
+}
 
-예시 JSON 구조
-name: ShowNotification
-args:
+---
 
-title: 알림
+## 3. CopyToClipboard
 
-message: 작업이 완료되었습니다.
+설명  
+지정된 텍스트를 클립보드에 복사합니다.
 
-사용자 예시
-
-완료됐다고 알림 띄워줘
-경고 알림 보여줘
-
-3. CopyToClipboard
-
-설명
-지정된 텍스트를 클립보드에 복사한다.
-
-함수 이름
+name  
 CopyToClipboard
 
-Args
-text (string, 필수)
+args  
+- text (string, required)
 
-예시 JSON 구조
-name: CopyToClipboard
-args:
+예시  
+{
+  "name": "CopyToClipboard",
+  "args": { "text": "복사할 내용" }
+}
 
-text: 복사할 내용
+---
 
-사용자 예시
+## 4. SaveLocalNote
 
-이 문장 복사해줘
-이 URL 클립보드에 복사해줘
+설명  
+로컬 또는 앱 내부 저장소에 메모를 저장합니다.
 
-4. SaveLocalNote
-
-설명
-로컬 또는 앱 내부 저장소에 메모를 저장한다.
-
-함수 이름
+name  
 SaveLocalNote
 
-Args
+args  
+- content (string, required)  
+- title (string, optional)  
+- tags (string[], optional)
 
-title (string, 선택)
+예시  
+{
+  "name": "SaveLocalNote",
+  "args": {
+    "title": "메모",
+    "content": "내용",
+    "tags": ["work", "idea"]
+  }
+}
 
-content (string, 필수)
+---
 
-tags (string 배열, 선택)
+## 5. SearchLocalDocs
 
-예시 JSON 구조
-name: SaveLocalNote
-args:
+설명  
+클라이언트가 관리하는 로컬 문서나 데이터에서 검색합니다.
 
-title: 메모 제목
-
-content: 메모 내용
-
-tags: work, idea
-
-사용자 예시
-
-이 내용 메모로 저장해줘
-
-아이디어로 태그해서 저장해줘
-
-5. SearchLocalDocs
-
-설명
-클라이언트가 관리하는 로컬 문서나 데이터에서 검색한다.
-
-함수 이름
+name  
 SearchLocalDocs
 
-Args
+args  
+- query (string, required)  
+- limit (number, optional, default=5)
 
-query (string, 필수)
+예시  
+{
+  "name": "SearchLocalDocs",
+  "args": { "query": "결제", "limit": 5 }
+}
 
-limit (number, 선택, 기본값 5)
+---
 
-예시 JSON 구조
-name: SearchLocalDocs
-args:
+## 6. SetAppTheme
 
-query: 검색어
+설명  
+애플리케이션 테마를 변경합니다.
 
-limit: 5
-
-사용자 예시
-
-로컬 문서에서 결제 관련 찾아줘
-
-로그인 관련 문서 검색해줘
-
-6. SetAppTheme
-
-설명
-애플리케이션 테마를 변경한다.
-
-함수 이름
+name  
 SetAppTheme
 
-Args
+args  
+- theme (string, required): light | dark | system
 
-theme (string, 필수): light, dark, system 중 하나
+예시  
+{
+  "name": "SetAppTheme",
+  "args": { "theme": "dark" }
+}
 
-예시 JSON 구조
-name: SetAppTheme
-args:
+---
 
-theme: dark
+## 7. PlaySound
 
-사용자 예시
+설명  
+지정된 효과음 또는 사운드를 재생합니다.
 
-다크모드로 바꿔줘
-
-시스템 설정 따라가게 해줘
-
-7. PlaySound
-
-설명
-지정된 효과음 또는 사운드를 재생한다.
-
-함수 이름
+name  
 PlaySound
 
-Args
+args  
+- soundId (string, required): success | error | click | alert
 
-soundId (string, 필수): success, error, click, alert
+예시  
+{
+  "name": "PlaySound",
+  "args": { "soundId": "success" }
+}
 
-예시 JSON 구조
-name: PlaySound
-args:
+---
 
-soundId: success
+## 8. Navigate
 
-사용자 예시
+설명  
+앱 내부 화면 또는 페이지로 이동합니다.
 
-성공 사운드 재생해줘
-
-에러 소리 들려줘
-
-8. Navigate
-
-설명
-앱 내부 화면 또는 페이지로 이동한다.
-
-함수 이름
+name  
 Navigate
 
-Args
+args  
+- route (string, required)  
+- params (object, optional)
 
-route (string, 필수)
+예시  
+{
+  "name": "Navigate",
+  "args": {
+    "route": "settings",
+    "params": { "tab": "account" }
+  }
+}
 
-params (object, 선택)
+---
 
-예시 JSON 구조
-name: Navigate
-args:
+## 9. ConfirmAction
 
-route: settings
+설명  
+사용자 확인이 필요한 경우 확인 다이얼로그를 표시합니다.
 
-params: tab=account
-
-사용자 예시
-
-설정 화면으로 가줘
-
-프로필 페이지로 이동해줘
-
-9. ConfirmAction
-
-설명
-사용자 확인이 필요한 경우 확인 다이얼로그를 표시한다.
-
-함수 이름
+name  
 ConfirmAction
 
-Args
+args  
+- message (string, required)  
+- confirmText (string, optional)  
+- cancelText (string, optional)
 
-message (string, 필수)
+예시  
+{
+  "name": "ConfirmAction",
+  "args": {
+    "message": "정말 삭제할까요?",
+    "confirmText": "삭제",
+    "cancelText": "취소"
+  }
+}
 
-confirmText (string, 선택)
+---
 
-cancelText (string, 선택)
+## 금지 사항 (절대 준수)
 
-예시 JSON 구조
-name: ConfirmAction
-args:
-
-message: 정말 삭제할까요?
-
-confirmText: 삭제
-
-cancelText: 취소
-
-사용자 예시
-
-삭제 전에 확인창 띄워줘
-
-진짜 실행할지 물어봐줘
-
-금지 사항 (절대 준수)
-
-이 문서에 없는 함수 이름을 생성하지 않는다.
-
-args 구조를 임의로 바꾸지 않는다.
-
-실행을 암시하는 행동을 직접 수행하지 않는다.
-
-항상 “제안” 형태의 JSON만 생성한다.
+- 이 문서에 없는 함수 이름을 생성하지 않습니다.
+- args 구조를 임의로 변경하지 않습니다.
+- 실행을 암시하는 행동을 직접 수행하지 않습니다.
+- 항상 **“제안” 형태의 JSON**만 생성합니다.

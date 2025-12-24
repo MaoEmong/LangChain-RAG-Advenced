@@ -17,29 +17,43 @@ from langchain_core.output_parsers import StrOutputParser
 # ============================================================
 # Helper 함수: Document 리스트를 컨텍스트 문자열로 변환
 # ============================================================
-def format_docs(docs):
+def format_docs(
+    docs,
+    *,
+    max_chars_per_doc: int = 900,     # 문서 1개당 최대 글자수
+    max_context_chars: int = 3500,    # 전체 컨텍스트 최대 글자수
+) -> str:
     """
     검색된 Document들을 LLM에 넣기 좋은 문자열로 변환합니다.
-    
-    각 문서에 번호와 출처를 붙여서:
-    - 문서들이 구분되도록 함
-    - 답변 생성 시 출처 추적 가능
-    - 문서가 섞여 보이는 문제 방지
-    
-    Args:
-        docs: 검색된 Document 객체 리스트
-    
-    Returns:
-        str: 포맷팅된 컨텍스트 문자열
+    - 각 문서별 길이 제한
+    - 전체 컨텍스트 길이 제한
     """
+
     blocks = []
+    total = 0
+
     for i, d in enumerate(docs, start=1):
-        # 문서 출처 정보 (파일 경로 등)
-        src = d.metadata.get("source", "unknown")
-        # [DOC 1] source=경로\n문서내용 형식으로 구성
-        blocks.append(f"[DOC {i}] source={src}\n{d.page_content}")
-    
-    # 문서들을 빈 줄 두 개로 구분하여 결합
+        src = (d.metadata or {}).get("source", "unknown")
+        text = d.page_content or ""
+
+        # 1) 문서별 컷
+        if len(text) > max_chars_per_doc:
+            text = text[:max_chars_per_doc].rstrip() + "\n…[TRUNCATED]"
+
+        block = f"[DOC {i}] source={src}\n{text}"
+
+        # 2) 전체 컨텍스트 컷
+        if total + len(block) > max_context_chars:
+            remain = max_context_chars - total
+            if remain <= 0:
+                break
+            block = block[:remain].rstrip() + "\n…[CONTEXT TRUNCATED]"
+            blocks.append(block)
+            break
+
+        blocks.append(block)
+        total += len(block) + 2  # \n\n 정도 여유
+
     return "\n\n".join(blocks)
 
 # ============================================================
