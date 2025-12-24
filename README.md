@@ -33,7 +33,68 @@
 └── chroma_db/            # 벡터 DB 저장 위치
 ```
 
-## 설치
+
+## 주요 파일 설명
+
+### 루트 디렉토리
+- **`rag_server.py`**: FastAPI 서버 메인 파일
+  - `/chat`, `/command`, `/ask` 엔드포인트 제공
+  - 2단계 검색 파이프라인 (벡터 검색 + FlashRank Re-Ranking) 실행
+  - Guardrail 및 Confidence 계산
+- **`ingest_langchain.py`**: 문서 수집 및 벡터DB 구축 스크립트
+  - `docs/` 폴더의 문서를 읽어서 ChromaDB에 저장
+  - 문서 청킹 및 임베딩 변환
+  - 문서가 변경되었을 때만 실행하면 됨
+- **`query_test.py`**: 벡터 검색 기능만 단독으로 테스트하는 스크립트
+  - 서버 실행 없이 검색 결과 확인 가능
+- **`config.py`**: 프로젝트 전역 설정 파일
+  - OpenAI API 키, 모델 설정, Guardrail 파라미터 등
+
+### chains/
+- **`rag_chain.py`**: RAG 체인 구성 모듈
+  - 검색된 문서를 컨텍스트로 변환하는 함수 제공
+  - LangChain 체인으로 질문 → 검색 → 답변 생성 파이프라인 구성
+- **`command_chain.py`**: 명령 생성 체인 구성 모듈
+  - 자연어 명령을 JSON 형식으로 변환하는 체인 구성
+
+### services/
+- **`vector_store.py`**: 벡터 저장소 생성 및 관리
+  - ChromaDB 벡터 저장소 초기화 및 로드
+- **`retrieval.py`**: 통합 검색 및 Re-Ranking 모듈
+  - 2단계 검색 파이프라인: 벡터 검색 → FlashRank Re-Ranking
+  - 원본 distance score를 rerank된 문서에 매핑
+- **`rerank_flashrank.py`**: FlashRank Re-Ranker 래퍼
+  - FlashRank를 사용하여 검색 결과 재정렬
+  - 경량 모델로 빠른 처리 속도 제공
+- **`confidence.py`**: 검색 결과 신뢰도 계산
+  - 최상위 문서 점수와 좋은 문서 개수를 종합하여 신뢰도 계산
+- **`intent_classifier.py`**: 사용자 의도 분류기
+  - Rule 기반 + LLM 기반 하이브리드 방식
+  - "command" 또는 "explain"으로 분류
+- **`command_parser.py`**: 명령 JSON 파서
+  - LLM이 생성한 JSON 문자열을 파싱 및 검증
+- **`command_validator.py`**: 명령 검증기
+  - 화이트리스트 기반으로 허용된 명령만 실행 가능하도록 검증
+
+### commands/
+- **`registry.py`**: 명령 화이트리스트 레지스트리
+  - 서버가 실행을 허용하는 명령 목록 정의
+  - 각 명령의 필수 인자 목록 포함
+
+### schemas/
+- **`command.py`**: 명령 스키마 정의
+  - CommandResponse, CommandAction Pydantic 모델
+- **`intent.py`**: 의도 분류 결과 스키마 정의
+  - IntentResult Pydantic 모델
+
+### prompts/
+- **`command_prompt.py`**: 명령 생성 프롬프트 템플릿
+  - 자연어 명령을 JSON으로 변환하기 위한 프롬프트
+- **`intent_prompt.py`**: 의도 분류 프롬프트 템플릿
+  - 사용자 입력을 "command" 또는 "explain"으로 분류하기 위한 프롬프트
+
+## 설치 & 환경 설정
+1) 패키지 설치  
 ```bash
 pip install -r requirements.txt
 ```
