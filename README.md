@@ -4,7 +4,8 @@ LangChain과 Chroma를 활용해 **RAG QA**와 **명령 JSON 생성**을 모두 
 
 ## 주요 기능
 - 다중 포맷 문서 로딩(`.txt/.md/.pdf/.docx/.html`) 후 청킹 및 Chroma에 적재 (`ingest_langchain.py`)
-- MMR 기반 retriever + guardrail: top score 컷, 충분한 good hit 검사
+- 2단계 검색 파이프라인: 벡터 검색 + FlashRank Re-Ranking으로 검색 정확도 향상
+- Guardrail: top score 컷, 충분한 good hit 검사
 - confidence 점수 계산 및 레벨(high/medium/low) 반환
 - intent 분류(rule → LLM)로 explain/command 자동 라우팅 (`/ask`)
 - 명령 JSON 생성 체인 + 화이트리스트 검증 (`/command`)
@@ -14,6 +15,7 @@ LangChain과 Chroma를 활용해 **RAG QA**와 **명령 JSON 생성**을 모두 
 - Python 3, FastAPI, Uvicorn
 - LangChain, LangChain OpenAI/Chroma/Text Splitters/Community
 - Chroma (persisted vector DB)
+- FlashRank (경량 Re-Ranking 모델)
 - Pydantic
 
 ## 폴더 구조
@@ -24,7 +26,7 @@ LangChain과 Chroma를 활용해 **RAG QA**와 **명령 JSON 생성**을 모두 
 ├── docs/                 # 원본 문서
 ├── prompts/              # LLM 프롬프트 템플릿
 ├── schemas/              # Pydantic 스키마
-├── services/             # vector DB, parser, validator, confidence, intent
+├── services/             # vector DB, retrieval, rerank, parser, validator, confidence, intent
 ├── ingest_langchain.py   # 문서 적재 스크립트
 ├── rag_server.py         # FastAPI 진입점 (/chat, /command, /ask)
 ├── query_test.py         # 검색만 단독 테스트
@@ -85,14 +87,15 @@ curl -X POST http://localhost:8000/ask \
 
 ## 동작 흐름
 1) ingest: 문서 로드 → 청킹 → 임베딩 → Chroma 적재  
-2) 요청 시: MMR 검색 → guardrail 검사(top score, good hits) → confidence 계산  
-3) `/chat`: 컨텍스트 포맷팅 → LLM 답변 + 출처 반환  
-4) `/command`: 컨텍스트 → LLM JSON 생성 → 파싱/검증 → 허용 명령만 반환  
+2) 요청 시: 벡터 검색(넓은 후보) → FlashRank Re-Ranking(정확도 향상) → guardrail 검사(top score, good hits) → confidence 계산  
+3) `/chat`: Re-Ranking된 문서로 컨텍스트 포맷팅 → LLM 답변 + 출처 반환  
+4) `/command`: Re-Ranking된 문서로 컨텍스트 구성 → LLM JSON 생성 → 파싱/검증 → 허용 명령만 반환  
 5) `/ask`: intent 분류 후 `/chat` 또는 `/command` 실행
 
 ## 주요 설정 포인트
 - `ingest_langchain.py`: `CHUNK_SIZE`, `CHUNK_OVERLAP`, `COLLECTION_NAME`
 - `config.py`: `TOP_K`, `TOP_SCORE_MAX`, `MIN_GOOD_HITS`, `GOOD_HIT_SCORE_MAX`, `CONF_SCORE_MIN/MAX`
+- `rag_server.py`: `INITIAL_K` (Re-Ranking을 위한 초기 후보 개수, 기본값: 20)
 - `commands/registry.py`: 허용 명령 및 필수 args 정의
 
 ## 보안/운영 팁
