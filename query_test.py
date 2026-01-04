@@ -1,7 +1,16 @@
 """
 query_test.py
-- ParentDocumentRetriever 동작 테스트용 (LangChain v1.x + langchain-classic 기준)
-- child(Chroma)로 검색 → parent(SQLite)로 복원해서 출력
+============================================================
+ParentDocumentRetriever 동작 테스트
+
+LangChain의 ParentDocumentRetriever를 사용한 문서 검색 테스트 스크립트입니다.
+
+테스트 내용:
+- Child(Chroma)로 검색 → Parent(SQLite)로 복원
+- 대화형 질의응답 테스트
+
+참고:
+- LangChain v1.x + langchain-classic 기준
 """
 
 from langchain_openai import OpenAIEmbeddings
@@ -23,6 +32,12 @@ CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
 
 def build_parent_retriever():
+    """
+    ParentDocumentRetriever를 구성하고 반환합니다.
+    
+    Returns:
+        ParentDocumentRetriever: LangChain ParentDocumentRetriever 객체
+    """
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL, api_key=OPENAI_API_KEY)
 
     db = Chroma(
@@ -51,6 +66,12 @@ def build_parent_retriever():
     )
 
 def main():
+    """
+    대화형 질의응답 테스트 메인 함수
+    
+    사용자 입력을 받아 검색하고 결과를 출력합니다.
+    'quit' 또는 Ctrl+C로 종료할 수 있습니다.
+    """
     retriever = build_parent_retriever()
 
     while True:
@@ -58,7 +79,7 @@ def main():
         if not q:
             continue
 
-        # ✅ v1.x 계열에서는 invoke()가 정석
+        # LangChain v1.x 계열에서는 invoke()가 표준 메서드
         docs = retriever.invoke(q)
 
         print("\n--- TOP MATCHES (PARENTS expected) ---")

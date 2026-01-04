@@ -1,224 +1,275 @@
 """
 services/retrieval.py
 ============================================================
-통합 검색 및 Re-Ranking 모듈
+문서 검색 서비스 (Parent-Child 기반)
 
-이 모듈은 2단계 검색 파이프라인을 제공합니다:
-1. 벡터 유사도 검색으로 넓은 후보 확보 (initial_k)
-2. FlashRank Re-Ranker로 관련성 높은 문서 재정렬 (top_k)
+Parent-Child 문서 구조를 사용한 고급 검색 기능을 제공합니다.
+- Child(청크)로 검색하여 정확도 향상
+- Parent(원문)로 복원하여 컨텍스트 제공
+- 키워드 바이어스로 OCR 문서 검색 최적화
+- Re-ranking으로 검색 결과 재정렬
 
-이 방식의 장점:
-- 벡터 검색의 빠른 속도 + Re-Ranker의 높은 정확도
-- Guardrail과 Confidence 계산을 위해 원본 distance score 보존
+주요 기능:
+1. 키워드 바이어스: OCR/스캔 문서 검색 시 키워드 매칭 우선
+2. Child 검색: 벡터 DB에서 작은 청크 단위로 검색
+3. Parent 복원: 검색된 청크의 원문 문서 복원
+4. Re-ranking: FlashRank를 사용한 검색 결과 재정렬
 """
 
-from typing import List, Tuple
+from __future__ import annotations
+
+import re
+from typing import List, Tuple, Dict
+
 from langchain_core.documents import Document
-# Document와 distance score의 튜플 타입
-# distance는 낮을수록 유사 (ChromaDB 기준)
-DocumentScore = Tuple[object, float]  # (Document, distance_score)
+
+DocumentScore = Tuple[Document, float]  # (Document, distance_score) 튜플 타입
 
 
-def _doc_key(d) -> str:
+# =========================
+# 1) Keyword-bias heuristics (키워드 바이어스 휴리스틱)
+# =========================
+# 운송장 번호, 트래킹 코드 패턴 정규식 (예: APX3002345386815CN)
+_TRACKING_RE = re.compile(r"\b[A-Z]{2,6}\d{8,20}[A-Z]{0,4}\b", re.IGNORECASE)
+
+def _looks_like_ocr_keyword_query(q: str) -> bool:
     """
-    Document를 고유하게 식별하기 위한 키를 생성합니다.
+    OCR/스캔 문서에서 키워드 매칭이 특히 중요한 질의인지 판별합니다.
     
-    rerank 후 원본 distance score를 매핑하기 위해 사용됩니다.
-    source(파일 경로) + page_content 일부를 조합하여 안정적인 키를 만듭니다.
+    운송장 번호, 트래킹 코드, 송장 번호 등의 키워드 검색은
+    OCR 문서에서 정확한 문자열 매칭이 중요하므로
+    OCR 문서를 우선 검색하도록 바이어스를 적용합니다.
     
     Args:
-        d: LangChain Document 객체
+        q: 사용자 질의 문자열
     
     Returns:
-        str: Document를 식별하는 고유 키
+        bool: OCR 키워드 질의로 판별되면 True
     
-    Note:
-        - source와 page_content의 처음 200자를 조합
-        - 같은 문서의 같은 청크는 항상 같은 키를 반환
+    판별 기준:
+        - 운송장, 송장, 트래킹 등의 키워드 포함
+        - 운송장 번호 패턴 (대문자+숫자 조합) 매칭
+        - 긴 영문+숫자 조합 (10자 이상)
     """
-    src = (d.metadata or {}).get("source", "unknown")
-    text = (d.page_content or "")
-    return f"{src}::{text[:200]}"
+    s = (q or "").strip()
+    if not s:
+        return False
+
+    up = s.upper()
+
+    # 흔한 키워드들 (운송장, 트래킹 관련)
+    keywords = [
+        "운송장", "송장", "트래킹", "배송", "배송조회", "운송", "택배",
+        "INVOICE", "TRACK", "TRACKING", "WAYBILL",
+        "APX", "4PX", "DHL", "FEDEX", "UPS",
+    ]
+    if any(k in up for k in keywords):
+        return True
+
+    # 트래킹 코드처럼 보이는 패턴 (예: APX3002345386815CN)
+    if _TRACKING_RE.search(up):
+        return True
+
+    # 영문+숫자 조합이 길게 들어오면 OCR 키워드일 가능성 높음
+    alnum = re.sub(r"[^A-Z0-9]", "", up)
+    if len(alnum) >= 10 and re.search(r"[A-Z]", alnum) and re.search(r"\d", alnum):
+        return True
+
+    return False
 
 
-def retrieve_with_rerank(
-    vector_db,
-    query: str,
-    initial_k: int,
-    top_k: int,
-    reranker,
-    docstore=None,           # ✅ 추가
-    parent_id_key="doc_id",  # ✅ 추가
-) -> List[DocumentScore]:
+def _search_children(vector_db, query: str, k: int, flt: Dict | None = None) -> List[Tuple[Document, float]]:
     """
-    통합 검색 및 Re-Ranking 함수
+    벡터 DB에서 child 문서(청크)를 검색합니다.
     
-    검색 파이프라인:
-    1. 벡터 유사도 검색으로 넓은 후보 확보 (initial_k개)
-    2. FlashRank Re-Ranker로 관련성 높은 문서 재정렬
-    3. 상위 top_k개만 선택
-    4. 원본 distance score를 rerank된 문서에 매핑
+    ChromaDB의 similarity_search_with_score를 사용하여
+    유사도 점수와 함께 문서를 검색합니다.
     
     Args:
-        vector_db: ChromaDB 벡터 저장소 객체
-        query (str): 검색 질문
-        initial_k (int): 초기 후보 문서 개수 (넓게 가져올 개수)
-        top_k (int): 최종 반환할 문서 개수
-        reranker: FlashRankReranker 객체
+        vector_db: ChromaDB 벡터 저장소
+        query: 검색 쿼리 문자열
+        k: 반환할 문서 개수
+        flt: 메타데이터 필터 딕셔너리 (선택사항)
+            - 예: {"domain": "ocr_scan"} → OCR 스캔 문서만 검색
     
     Returns:
-        List[DocumentScore]: (Document, distance_score) 튜플 리스트
-            - rerank된 순서로 정렬됨
-            - 원본 벡터 검색의 distance score가 보존됨
+        List[Tuple[Document, float]]: (Document, distance_score) 튜플 리스트
+            - distance_score가 낮을수록 유사도 높음
     
     Note:
-        - initial_k는 top_k보다 크게 설정하는 것이 좋음 (예: 20 vs 4)
-        - rerank는 doc만 재정렬하므로 원본 score를 별도로 매핑해야 함
-        - 매핑 실패 시 999.0 (불리한 값)을 부여하여 Guardrail에서 차단되도록 함
+        - langchain-chroma는 similarity_search_with_score 메서드를 제공합니다
+        - filter는 메타데이터 기반 where 조건으로 적용됩니다
     """
-    # ============================================================
-    # 1단계: 벡터 유사도 검색으로 넓은 후보 확보
-    # ============================================================
-    # initial_k개를 가져와서 rerank할 풀을 만듦
-    # score를 포함하여 가져옴 (Guardrail/Confidence 계산에 필요)
-    candidates = vector_db.similarity_search_with_score(query, k=initial_k)
-    if not candidates:
+    if flt:
+        # 메타데이터 필터 적용 검색
+        return vector_db.similarity_search_with_score(query, k=k, filter=flt)
+    # 필터 없이 검색
+    return vector_db.similarity_search_with_score(query, k=k)
+
+
+def _get_child_candidates(vector_db, query: str, initial_k: int) -> List[Tuple[Document, float]]:
+    """
+    Child 문서(청크) 후보를 검색합니다 (키워드 바이어스 적용).
+    
+    OCR/스캔 키워드 질의인 경우:
+    1. 먼저 OCR 스캔 문서만 검색 (domain=ocr_scan)
+    2. 결과가 충분하면 그대로 사용
+    3. 부족하면 전체 검색으로 보강 (중복 제거)
+    
+    일반 질의인 경우:
+    - 전체 문서에서 검색
+    
+    Args:
+        vector_db: ChromaDB 벡터 저장소
+        query: 검색 쿼리 문자열
+        initial_k: 초기 검색 개수
+    
+    Returns:
+        List[Tuple[Document, float]]: (Document, distance_score) 튜플 리스트
+            - distance 오름차순 정렬 (best first)
+    """
+    use_ocr_bias = _looks_like_ocr_keyword_query(query)
+
+    if use_ocr_bias:
+        # 키워드 바이어스 적용: OCR 스캔 문서 우선 검색
+        # 1) OCR 스캔 문서만 먼저 검색
+        ocr_only = _search_children(vector_db, query, k=initial_k, flt={"domain": "ocr_scan"})
+        
+        # 충분한 결과가 있으면 그대로 사용
+        if len(ocr_only) >= max(3, initial_k // 4):
+            return ocr_only
+
+        # 2) 부족하면 전체 검색으로 보강 (중복 제거)
+        all_docs = _search_children(vector_db, query, k=initial_k, flt=None)
+
+        # 중복 제거를 위한 키 생성 (source, doc_id, content 시작 부분)
+        seen = set()
+        merged: List[Tuple[Document, float]] = []
+
+        for d, s in ocr_only + all_docs:
+            key = (d.metadata.get("source"), d.metadata.get("doc_id"), d.page_content[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append((d, float(s)))
+
+        # distance 오름차순 정렬 (best first)
+        merged.sort(key=lambda x: x[1])
+        return merged[:initial_k]
+
+    # 일반 질의: 기존 방식 (전체 검색)
+    return _search_children(vector_db, query, k=initial_k, flt=None)
+
+
+def _restore_parents(docstore, child_scored: List[Tuple[Document, float]], parent_id_key: str) -> List[DocumentScore]:
+    """
+    Child 문서(청크) 결과에서 Parent 문서(원문)를 복원합니다.
+    
+    Child 문서의 doc_id를 기반으로 Parent 문서를 조회하고,
+    같은 Parent의 여러 Child 중 가장 좋은 점수를 Parent의 대표 점수로 사용합니다.
+    
+    Args:
+        docstore: Parent 문서 저장소 (SQLiteDocStore)
+        child_scored: Child 문서와 점수 튜플 리스트
+        parent_id_key: 메타데이터에서 Parent ID를 가져올 키 이름 (기본: "doc_id")
+    
+    Returns:
+        List[DocumentScore]: (Parent Document, best_score) 튜플 리스트
+            - score 오름차순 정렬 (best first)
+    
+    Note:
+        - 같은 Parent의 여러 Child가 있으면 가장 좋은 점수(최소 distance)를 사용
+        - Distance 점수는 낮을수록 유사도가 높으므로 좋은 점수입니다
+    """
+    best_score_by_parent: Dict[str, float] = {}  # Parent별 최고 점수
+    parent_doc_by_id: Dict[str, Document] = {}   # Parent 문서 캐시
+
+    # Child 문서를 순회하며 Parent별 최고 점수 찾기
+    for child_doc, score in child_scored:
+        pid = child_doc.metadata.get(parent_id_key)
+        if not pid:
+            continue
+
+        # Parent별 best score 유지 (distance는 낮을수록 좋음)
+        if (pid not in best_score_by_parent) or (score < best_score_by_parent[pid]):
+            best_score_by_parent[pid] = float(score)
+
+    if not best_score_by_parent:
         return []
-    
-    # ✅ Parent 모드
-    if docstore is not None:
-        # 1) child → parent_id별 best score 추출
-        best_score_by_pid = {}
-        for d, s in candidates:
-            pid = (d.metadata or {}).get(parent_id_key)
-            if not pid:
-                continue
-            s = float(s)
-            if pid not in best_score_by_pid or s < best_score_by_pid[pid]:
-                best_score_by_pid[pid] = s
-    
-        if not best_score_by_pid:
-            return []
-    
-        # 2) parent 문서 로드
-        pids = list(best_score_by_pid.keys())
-        parent_docs = docstore.mget(pids)
-    
-        # mget 결과엔 None이 섞일 수 있으니 필터
-        parents = []
-        for pid, pd in zip(pids, parent_docs):
-            if pd is None:
-                continue
-            pd.metadata = pd.metadata or {}
-            pd.metadata[parent_id_key] = pid  # parent에도 id 보장
-            parents.append(pd)
-    
-        if not parents:
-            return []
-    
-        # 3) parent로 rerank
-        reranked_parents = reranker.rerank(query=query, docs=parents, top_n=top_k)
-    
-        # 4) rerank 결과에 score 매핑
-        results = []
-        for pd in reranked_parents:
-            pid = (pd.metadata or {}).get(parent_id_key)
-            results.append((pd, float(best_score_by_pid.get(pid, 999.0))))
-        return results
-    
+
+    # Parent 문서 조회
+    parent_ids = list(best_score_by_parent.keys())
+    parent_docs = docstore.mget(parent_ids)  # None 포함 가능
+
+    # Parent 문서 캐시 구축
+    for pid, pdoc in zip(parent_ids, parent_docs):
+        if pdoc:
+            parent_doc_by_id[pid] = pdoc
+
+    # 결과 리스트 생성
+    results: List[DocumentScore] = []
+    for pid, score in best_score_by_parent.items():
+        pdoc = parent_doc_by_id.get(pid)
+        if pdoc:
+            results.append((pdoc, float(score)))
+
+    # score 오름차순 정렬 (best first)
+    results.sort(key=lambda x: x[1])
+    return results
+
 
 def retrieve_parents_with_rerank(
     vector_db,
-    docstore,                 # SQLiteDocStore
+    docstore,
     query: str,
     initial_k: int,
     top_k: int,
     reranker,
     parent_id_key: str = "doc_id",
-    fetch_multiplier: int = 3,   # parent dedupe 때문에 rerank 범위를 top_k보다 넓힘
 ) -> List[DocumentScore]:
     """
-    child(청크)로 검색 + rerank + score 보존 → parent로 승격해서 반환
-
-    parent 점수 = 해당 parent로 연결된 child들의 최소 distance score
-    반환 순서 = rerank된 child 순서를 따라가되 parent 단위로 dedupe
+    Parent-Child 구조를 사용한 문서 검색 (Re-ranking 포함).
+    
+    검색 프로세스:
+    1. Child 벡터 검색: initial_k 개의 Child 문서(청크) 검색 (키워드 바이어스 포함)
+    2. Re-ranking: FlashRank를 사용하여 Child 문서 재정렬
+    3. Parent 복원: 상위 top_k 개의 Child에 해당하는 Parent 문서 복원
+    
+    Args:
+        vector_db: ChromaDB 벡터 저장소
+        docstore: Parent 문서 저장소 (SQLiteDocStore)
+        query: 검색 쿼리 문자열
+        initial_k: 초기 검색 개수 (Child 문서)
+        top_k: 최종 반환 개수 (Parent 문서)
+        reranker: Re-ranking 엔진 (FlashRankReranker 등)
+        parent_id_key: 메타데이터에서 Parent ID를 가져올 키 이름
+    
+    Returns:
+        List[DocumentScore]: (Parent Document, score) 튜플 리스트
+            - 최대 top_k 개까지 반환
+            - score 오름차순 정렬 (best first)
+    
+    Note:
+        - 키워드 바이어스: OCR 키워드 질의 시 OCR 문서 우선 검색
+        - Re-ranking으로 검색 정확도 향상
+        - Parent 복원으로 원문 컨텍스트 제공
     """
-
-    # 1) child 후보 확보 (score 포함)
-    candidates: List[Tuple[Document, float]] = vector_db.similarity_search_with_score(query, k=initial_k)
-    if not candidates:
+    # 1) Child 후보 검색 (키워드 바이어스 포함)
+    child_scored = _get_child_candidates(vector_db, query, initial_k)
+    if not child_scored:
         return []
 
-    # 2) rerank는 Document만 받음
-    child_docs = [d for d, _ in candidates]
+    child_docs = [d for d, _ in child_scored]
 
-    # dedupe 때문에 top_k보다 넓게 rerank
-    rerank_n = min(len(child_docs), max(top_k * fetch_multiplier, top_k))
-    reranked_children = reranker.rerank(query=query, docs=child_docs, top_n=rerank_n)
+    # 2) Re-ranking: FlashRank로 Child 문서 재정렬
+    reranked_docs = reranker.rerank(query, child_docs)
 
-    # 3) child score lookup
-    score_map: Dict[str, float] = {}
-    for d, s in candidates:
-        # 기존 retrieval.py의 _doc_key 방식이 있으면 그걸 써도 됨
-        src = (d.metadata or {}).get("source", "unknown")
-        text = (d.page_content or "")
-        k = f"{src}::{text[:200]}"
-        score_map[k] = float(s)
+    # Re-ranking 결과에 따라 Child 점수 리스트 재정렬
+    # reranker가 Document 객체를 그대로 반환한다고 가정
+    reranked_set = {id(d): i for i, d in enumerate(reranked_docs)}
+    child_scored.sort(key=lambda pair: reranked_set.get(id(pair[0]), 10**9))
 
-    def _child_key(d: Document) -> str:
-        src = (d.metadata or {}).get("source", "unknown")
-        text = (d.page_content or "")
-        return f"{src}::{text[:200]}"
-
-    # 4) parent_id 기준으로 dedupe + parent_score(min child score)
-    parent_best_score: Dict[str, float] = {}
-    parent_first_child: Dict[str, Document] = {}  # parent metadata 보정용(예: source)
-    parent_order: List[str] = []
-
-    for child in reranked_children:
-        pid = (child.metadata or {}).get(parent_id_key)
-        if not pid:
-            # parent id가 없으면 승격 불가 → skip(혹은 child를 그대로 쓰는 fallback도 가능)
-            continue
-
-        child_score = score_map.get(_child_key(child), 999.0)
-
-        if pid not in parent_best_score:
-            parent_best_score[pid] = child_score
-            parent_first_child[pid] = child
-            parent_order.append(pid)
-        else:
-            # 같은 parent에 더 좋은 child가 있으면 score 갱신
-            if child_score < parent_best_score[pid]:
-                parent_best_score[pid] = child_score
-
-        if len(parent_order) >= top_k:
-            # 이미 top_k개의 parent를 확보했으면 조기 종료 가능
-            # (하지만 더 좋은 score를 찾고 싶으면 이 break를 제거해도 됨)
-            pass
-
-    if not parent_order:
-        return []
-
-    # 5) docstore에서 parent 문서 로드
-    parent_docs: List[Optional[Document]] = docstore.mget(parent_order)
-
-    # 6) 결과 조립 (parent 문서 + parent_score)
-    results: List[DocumentScore] = []
-    for pid, pdoc in zip(parent_order, parent_docs):
-        if pdoc is None:
-            continue
-
-        # parent 문서에 source가 없으면 child의 source로 보정
-        if (pdoc.metadata or {}).get("source") is None:
-            child = parent_first_child.get(pid)
-            if child is not None:
-                pdoc.metadata = dict(pdoc.metadata or {})
-                pdoc.metadata["source"] = (child.metadata or {}).get("source")
-
-        results.append((pdoc, float(parent_best_score.get(pid, 999.0))))
-
-        if len(results) >= top_k:
-            break
-
-    return results
+    # 3) 상위 top_k 개의 Child만 사용하여 Parent 복원
+    child_scored = child_scored[: max(top_k, 1)]
+    parents = _restore_parents(docstore, child_scored, parent_id_key=parent_id_key)
+    return parents[:top_k]
